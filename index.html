@@ -109,6 +109,10 @@
       </div>
 
       <div style="margin-top:12px">
+        <div class="row" style="margin-top:8px">
+  <button id="speakFront">🔊 Ouvir frente (en-US)</button>
+  <button id="speakBack">🔊 Ouvir verso (en-US)</button>
+</div>
         <p class="muted" id="frontLabel">Frente</p>
         <p class="big" id="frontText"></p>
 
@@ -285,6 +289,42 @@ const LS = {
 };
 
 const now = () => Date.now();
+  // ===== TTS (en-US) =====
+let ttsVoice = null;
+
+function pickEnUsVoice(){
+  const voices = window.speechSynthesis?.getVoices?.() || [];
+  // tenta achar en-US primeiro
+  ttsVoice = voices.find(v => (v.lang || "").toLowerCase() === "en-us")
+          || voices.find(v => (v.lang || "").toLowerCase().startsWith("en-"))
+          || null;
+}
+
+if ("speechSynthesis" in window) {
+  // em iOS, as vozes podem carregar depois
+  window.speechSynthesis.onvoiceschanged = pickEnUsVoice;
+  pickEnUsVoice();
+}
+
+function speakEnUS(text){
+  if(!("speechSynthesis" in window)) {
+    alert("Seu navegador não suporta áudio (speechSynthesis).");
+    return;
+  }
+  const t = (text || "").trim();
+  if(!t) return;
+
+  // parar fala anterior
+  window.speechSynthesis.cancel();
+
+  const u = new SpeechSynthesisUtterance(t);
+  u.lang = "en-US";
+  if(ttsVoice) u.voice = ttsVoice;
+  u.rate = 1.0;  // pode ajustar depois (0.8–1.1)
+  u.pitch = 1.0;
+
+  window.speechSynthesis.speak(u);
+}
 const dayKey = (t=Date.now()) => new Date(t).toISOString().slice(0,10);
 const clamp = (v,min,max) => Math.max(min, Math.min(max, v));
 
@@ -330,7 +370,106 @@ ensureInit();
  * easy : interval=max(2, round(interval*2.6)), ease+=0.10
  * due = now + interval dias
  */
+/** ====== SRS (Anki-ish simplificado) ======
+ * Campos usados:
+ *  - state: "new" | "learning" | "review"
+ *  - due: timestamp (ms)
+ *  - interval: dias (para review)
+ *  - ease: ease factor (EF) ~ 1.3 a 3.0 (Anki usa EF parecido)
+ *  - reps: número de repetições bem-sucedidas em review
+ *  - lapses: vezes que caiu (errou) em review/learning
+ *  - learningStep: 0/1 (pra controlar o passo de 1 hora)
+ *
+ * Regras (simplificadas):
+ *  - New começa vencido (due=agora)
+ *  - Again (Errei): entra/continua em learning, due=+1h, lapses++, learningStep=0
+ *  - Hard (Difícil): learning, due=+1h, learningStep=0 (não reduz EF muito)
+ *  - Good/Bom:
+ *      se learning/new -> gradua para review com interval=1 dia (ou 2 se easy)
+ *      se review -> SM-2 simplificado: interval *= EF (com mínimo 1)
+ *  - Easy/Fácil:
+ *      se learning/new -> gradua com interval=2-3 dias
+ *      se review -> interval *= EF * 1.3
+ *
+ * EF update (bem parecido com Anki/SM-2):
+ *  - again: EF -= 0.20
+ *  - hard : EF -= 0.15
+ *  - good : EF += 0.00
+ *  - easy : EF += 0.15
+ */
 function applyRating(card, rating){
+  const ONE_HOUR = 3600000;
+  const ONE_DAY  = 86400000;
+
+  let ease = card.ease ?? 2.5;
+  ease = clamp(ease, 1.3, 3.0);
+
+  let interval = card.interval ?? 0; // dias (review)
+  let lapses = card.lapses ?? 0;
+  let reps = card.reps ?? 0;
+
+  let state = card.state ?? ((card.reps ?? 0) === 0 ? "new" : "review");
+  let learningStep = card.learningStep ?? 0;
+
+  const isLearning = (state === "learning" || state === "new");
+
+  // Helpers
+  const setDueHours = (h) => now() + h * ONE_HOUR;
+  const setDueDays  = (d) => now() + d * ONE_DAY;
+
+  if(rating === "again"){
+    ease = clamp(ease - 0.20, 1.3, 3.0);
+    lapses += 1;
+    state = "learning";
+    learningStep = 0;
+    // volta em 1 hora
+    const due = setDueHours(1);
+    return { ...card, ease, interval: 0, lapses, reps, state, learningStep, due, lastReviewed: now() };
+  }
+
+  if(rating === "hard"){
+    ease = clamp(ease - 0.15, 1.3, 3.0);
+    // pedido do Andrei: "Difícil" volta em 1 hora
+    state = "learning";
+    learningStep = 0;
+    const due = setDueHours(1);
+    return { ...card, ease, interval: 0, lapses, reps, state, learningStep, due, lastReviewed: now() };
+  }
+
+  if(rating === "good"){
+    // Se estava em learning/new, gradua pro review
+    if(isLearning){
+      state = "review";
+      reps = Math.max(reps, 0) + 1;
+      interval = 1; // 1 dia
+      const due = setDueDays(interval);
+      return { ...card, ease, interval, lapses, reps, state, learningStep: 0, due, lastReviewed: now() };
+    }
+
+    // Se já está em review: interval *= ease
+    reps += 1;
+    interval = Math.max(1, Math.round(Math.max(1, interval) * ease));
+    const due = setDueDays(interval);
+    return { ...card, ease, interval, lapses, reps, state: "review", learningStep: 0, due, lastReviewed: now() };
+  }
+
+  // easy
+  if(isLearning){
+    ease = clamp(ease + 0.15, 1.3, 3.0);
+    state = "review";
+    reps = Math.max(reps, 0) + 1;
+    interval = 3; // você pode mudar para 2 se quiser mais agressivo
+    const due = setDueDays(interval);
+    return { ...card, ease, interval, lapses, reps, state, learningStep: 0, due, lastReviewed: now() };
+  }
+
+  // review easy
+  ease = clamp(ease + 0.15, 1.3, 3.0);
+  reps += 1;
+  interval = Math.max(1, Math.round(Math.max(1, interval) * ease * 1.3));
+  const due = setDueDays(interval);
+  return { ...card, ease, interval, lapses, reps, state: "review", learningStep: 0, due, lastReviewed: now() };
+}
   let ease = card.ease ?? 2.5;
   let interval = card.interval ?? 0;
   let lapses = card.lapses ?? 0;
@@ -657,7 +796,16 @@ $("startReview").onclick = () => {
   nextCard();
 };
 
-$("toggleAnswer").onclick = () => {
+$("toggleAnswer").onclick = $("speakFront").onclick = () => speakEnUS($("frontText").textContent);
+$("speakBack").onclick  = () => {
+  // Só deixa falar o verso quando a resposta estiver visível (opcional)
+  const showing = $("answerBlock").classList.contains("show");
+  if(!showing) {
+    alert("Mostre a resposta primeiro para ouvir o verso.");
+    return;
+  }
+  speakEnUS($("backText").textContent);
+}; () => {
   const ans = $("answerBlock");
   const showing = ans.classList.toggle("show");
   $("toggleAnswer").textContent = showing ? "Ocultar resposta" : "Mostrar resposta";
