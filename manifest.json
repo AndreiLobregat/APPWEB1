@@ -1,0 +1,15 @@
+{
+  "name": "Meu SRS (tipo Anki)",
+  "short_name": "Meu SRS",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#0b1220",
+  "theme_color": "#0b1220",
+  "icons": [
+    {
+      "src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAQAAAAAYLlVAAAAJ0lEQVR42u3MMQ0AAAgDIN8/9K3hQh0kqQAAAAAAAAAAAAAAAPgGmQAB1p5Q2QAAAABJRU5ErkJggg==",
+      "sizes": "64x64",
+      "type": "image/png"
+    }
+  ]
+}
